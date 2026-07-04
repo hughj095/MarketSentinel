@@ -3,6 +3,12 @@ Agentic AI network that monitors the markets (DJIA, Nasdaq, S&amp;P500) and econ
 
 This repository contains modular AI agents for stock market monitoring and analysis. The system architecture is as follows:
 
+## Agents
+
+- `agent_market.py`: Scans major indices for short-term movement and volume shifts.
+- `agent_news.py`: Provides macro and ticker-level news payloads.
+- `agent_calendar.py`: Monitors macroeconomic release events (MarketWatch first, with fallback), runs LLM/rule-based assessment, and outputs decision JSON.
+
 # AI Trading Agent Architecture (Mermaid)
 
 ```mermaid
