@@ -8,17 +8,24 @@ from html import unescape
 
 import requests
 
+# Try importing the OpenAI SDK dynamically so the script still runs
+# in environments where the package is not installed.
 try:
     openai = importlib.import_module("openai")  # pip install openai
 except Exception:
     openai = None
 
 
+# Primary source (HTML page) and fallback source (XML feed)
 MARKETWATCH_CALENDAR_URL = "https://www.marketwatch.com/economy-politics/calendar"
 FF_CALENDAR_XML_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
 
 
 def _http_get_text(url, timeout=20):
+    """
+    Perform an HTTP GET and return response text.
+    Uses browser-like headers to reduce the chance of simple bot filtering.
+    """
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -33,6 +40,9 @@ def _http_get_text(url, timeout=20):
 
 
 def _looks_like_bot_block(text):
+    """
+    Detect common anti-bot / challenge pages by looking for known text signatures.
+    """
     lowered = text.lower()
     signatures = [
         "please enable js",
@@ -45,6 +55,9 @@ def _looks_like_bot_block(text):
 
 
 def _normalize_event(raw):
+    """
+    Normalize event objects from different source formats into one schema.
+    """
     return {
         "title": raw.get("title") or raw.get("eventName") or raw.get("name") or "Unknown",
         "country": raw.get("country") or raw.get("currency") or "Unknown",
@@ -62,18 +75,27 @@ def _normalize_event(raw):
 
 
 def _extract_marketwatch_events_from_text(text):
-    # The page format can vary; this extracts small JSON object fragments containing event fields.
+    """
+    Heuristically pull event-like JSON objects from MarketWatch HTML.
+    This is intentionally flexible because page structure can change.
+    """
+    # Convert HTML entities (&quot;, etc.) before regex/JSON parsing.
     normalized = unescape(text)
+
+    # Find short JSON-looking blobs containing at least one expected calendar field.
     pattern = re.compile(r"\{[^{}]{0,2200}(?:eventName|consensus|actual|previous)[^{}]{0,2200}\}")
     candidates = pattern.findall(normalized)
 
     events = []
     for blob in candidates:
         snippet = blob
+
+        # Replace JavaScript's undefined with JSON-compatible null.
         snippet = re.sub(r"\bundefined\b", "null", snippet)
         try:
             obj = json.loads(snippet)
         except Exception:
+            # Skip malformed snippets.
             continue
         if not isinstance(obj, dict):
             continue
@@ -81,6 +103,7 @@ def _extract_marketwatch_events_from_text(text):
             continue
         events.append(_normalize_event(obj))
 
+    # Deduplicate by a simple identity tuple.
     unique = []
     seen = set()
     for event in events:
@@ -93,6 +116,10 @@ def _extract_marketwatch_events_from_text(text):
 
 
 def scrape_marketwatch_calendar():
+    """
+    Scrape MarketWatch calendar page and parse events.
+    Raises if blocked or if parsing yields no events.
+    """
     html = _http_get_text(MARKETWATCH_CALENDAR_URL)
     if _looks_like_bot_block(html):
         raise RuntimeError("MarketWatch blocked automated scraping from this environment.")
@@ -104,6 +131,9 @@ def scrape_marketwatch_calendar():
 
 
 def scrape_forex_factory_xml():
+    """
+    Fallback data source: parse ForexFactory weekly XML feed.
+    """
     xml_text = _http_get_text(FF_CALENDAR_XML_URL)
     root = ET.fromstring(xml_text)
 
@@ -128,6 +158,10 @@ def scrape_forex_factory_xml():
 
 
 def get_macro_calendar_events():
+    """
+    Try primary source first (MarketWatch), then fallback to ForexFactory XML.
+    Return a payload describing source used and any errors encountered.
+    """
     errors = []
 
     try:
@@ -150,9 +184,14 @@ def get_macro_calendar_events():
 
 
 def _heuristic_decision(events):
+    """
+    Deterministic risk classifier when LLM is unavailable/fails.
+    """
+    # Treat high-impact and holiday events as highest risk.
     high = [e for e in events if str(e.get("impact", "")).lower() in ("high", "holiday")]
     medium = [e for e in events if str(e.get("impact", "")).lower() == "medium"]
 
+    # Simple rule set to classify event risk regime.
     if len(high) >= 4:
         regime = "high_volatility_risk"
         action = "reduce position size; avoid new leveraged entries around release windows"
@@ -172,6 +211,10 @@ def _heuristic_decision(events):
 
 
 def generate_llm_calendar_decision(calendar_payload):
+    """
+    Use OpenAI to summarize calendar risk and produce a structured decision.
+    Falls back to deterministic heuristics if no API key/package or API call fails.
+    """
     events = calendar_payload.get("events", [])
     if not events:
         return {
@@ -188,6 +231,7 @@ def generate_llm_calendar_decision(calendar_payload):
             "reason": "No events available",
         }
 
+    # If OpenAI isn't configured, return rule-based output.
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key or openai is None:
         return {
@@ -200,6 +244,7 @@ def generate_llm_calendar_decision(calendar_payload):
         }
 
     try:
+        # Legacy OpenAI SDK usage pattern.
         openai.api_key = api_key
         prompt = f"""
 You are a macro risk assistant.
@@ -222,6 +267,7 @@ Economic calendar payload:
         parsed["llm_used"] = True
         return parsed
     except Exception as exc:
+        # Safe fallback if the LLM call fails or returns invalid JSON.
         return {
             "summary": "LLM call failed; falling back to deterministic risk logic.",
             "event_risk_assessment": "rule-based-fallback",
@@ -233,9 +279,13 @@ Economic calendar payload:
 
 
 if __name__ == "__main__":
+    # 1) Fetch calendar events (with fallback source if needed)
     calendar_payload = get_macro_calendar_events()
+
+    # 2) Generate a decision payload (LLM if available, rules otherwise)
     llm_result = generate_llm_calendar_decision(calendar_payload)
 
+    # 3) Emit one structured JSON output for downstream logging/automation
     output = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "agent": "economic_calendar_monitor",
